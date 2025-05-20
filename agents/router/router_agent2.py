@@ -441,6 +441,7 @@ AVAILABLE_TOOLS_SPEC = {
 }
 
 def _track_usage(loop_state: RouterLoopState, usage_data: Optional[Usage], console: Optional[Any]):
+    """Tracks token usage and cost in the loop state."""
     if usage_data and getattr(usage_data, "total_tokens", None) is not None: # Fix #4
         loop_state.shared_context.setdefault(f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_tokens_consumed_loop", 0)
         loop_state.shared_context.setdefault(f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_cost_incurred_loop", 0.0)
@@ -451,6 +452,351 @@ def _track_usage(loop_state: RouterLoopState, usage_data: Optional[Usage], conso
         loop_state.shared_context[f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_cost_incurred_loop"] += current_cost
         if console:
             console.print(f"[dim](Usage: {usage_data.total_tokens} tokens, ~${current_cost:.6f})[/dim]")
+            
+async def plan_next_step(
+    loop_state: RouterLoopState, 
+    console: Optional[Any] = None,
+    verbose: bool = False
+) -> Union[CallTool, SynthesizeFinalAnswer, StopProcessing]:
+    """
+    Runs the planner agent to determine the next step in the problem-solving process.
+    
+    Args:
+        loop_state: The current state of the routing loop
+        console: Optional rich console for output
+        verbose: Whether to show verbose debug output
+        
+    Returns:
+        A planner decision (CallTool, SynthesizeFinalAnswer, or StopProcessing)
+        
+    Raises:
+        Exception: If the planner agent fails
+    """
+    # Get the state summary for the planner
+    state_summary_for_planner = loop_state.get_summary_for_planner()
+    
+    # Display the planner input if verbose mode
+    if console and verbose:
+        console.print("[bold dim]Planner Input Summary:[/bold dim]")
+        try:
+            from rich.panel import Panel as RichPanel
+            console.print(RichPanel(state_summary_for_planner, title="State for Planner", expand=False, border_style="dim"))
+        except ImportError:
+            console.print(state_summary_for_planner)
+
+    # Prepare dependencies for the planner agent
+    planner_deps = RouterDeps(context=loop_state.shared_context.copy(), console=console)
+    
+    # Run the planner agent
+    planner_start_time = time.time()
+    try:
+        planner_result_obj = await planner_orchestrator_agent.run(state_summary_for_planner, deps=planner_deps)
+        planner_decision = planner_result_obj.output
+        
+        # Debug output if in verbose mode
+        if console and verbose:
+            console.print(f"[dim]Debug - Planner decision type: {type(planner_decision)}, content: {planner_decision}[/dim]")
+            
+        # Track token usage
+        _track_usage(loop_state, planner_result_obj.usage, console)
+        
+        # Log the planner decision
+        planner_elapsed = time.time() - planner_start_time
+        if console:
+            console.print(f"[dim]Planner decision in {planner_elapsed:.2f}s: Action='{planner_decision.action}'[/dim]")
+            if verbose and planner_decision.thought:
+                try:
+                    from rich.panel import Panel as RichPanel
+                    console.print(RichPanel(planner_decision.thought, title="Planner's Thought", border_style="yellow", expand=False))
+                except ImportError:
+                    console.print(f"Planner Thought: {planner_decision.thought}")
+        
+        # Update the goal if the planner has refined it
+        if planner_decision.updated_goal:
+            if console: 
+                console.print(f"[cyan]Goal refined by planner to: '{planner_decision.updated_goal}'[/cyan]")
+            loop_state.current_goal = planner_decision.updated_goal
+            
+        return planner_decision
+        
+    except Exception as e:
+        if console: 
+            console.print(f"[bold red]Planner Error: {e}[/bold red]")
+        raise
+
+
+async def execute_tool_call(
+    call_tool_decision: CallTool,
+    loop_state: RouterLoopState,
+    console: Optional[Any] = None,
+    verbose: bool = False
+) -> bool:
+    """
+    Executes a tool call based on the planner's decision.
+    
+    Args:
+        call_tool_decision: The CallTool decision from the planner
+        loop_state: The current state of the routing loop
+        console: Optional rich console for output
+        verbose: Whether to show verbose debug output
+        
+    Returns:
+        True if execution succeeded, False otherwise
+    """
+    tool_name = call_tool_decision.tool_name
+    task_description = call_tool_decision.task_description
+    
+    # Get tool input from the args field
+    tool_input_dict = call_tool_decision.args.model_dump() if call_tool_decision.args else {}
+
+    # Validate tool_name
+    if not tool_name or tool_name not in AVAILABLE_TOOLS_SPEC:
+        if console: 
+            console.print(f"[bold red]Planner Error: Invalid or missing tool_name '{tool_name}'. Stopping.[/bold red]")
+        loop_state.stop_reason = f"Planner chose invalid tool: {tool_name}"
+        return False
+
+    # Create task and add to plan
+    current_task = Task(description=task_description, agent_tool_name=tool_name, tool_input=tool_input_dict)
+    loop_state.plan.append(current_task)
+
+    # Log tool execution if console is provided
+    if console:
+        console.print(f"[cyan]Executing Tool:[/cyan] '{tool_name}' for task '{current_task.description}'")
+        if verbose: 
+            console.print(f"[dim]Tool Input: {tool_input_dict}[/dim]")
+    
+    # Get tool specification and agent
+    tool_spec = AVAILABLE_TOOLS_SPEC[tool_name]
+    tool_agent = tool_spec["agent"]
+    
+    # Prepare arguments for tool_agent.run()
+    prompt_value_for_agent: Union[str, List[ModelMessage], BaseModel]
+    kwargs_for_agent: Dict[str, Any] = {}
+
+    # Extract primary input for the tool
+    temp_tool_input_copy = tool_input_dict.copy()
+    primary_input_key = tool_spec.get("primary_input_key")
+
+    # Determine the prompt value based on available inputs
+    if primary_input_key and primary_input_key in temp_tool_input_copy:
+        prompt_value_for_agent = temp_tool_input_copy[primary_input_key]
+        temp_copy = temp_tool_input_copy.copy()
+        temp_copy.pop(primary_input_key)
+        kwargs_for_agent = temp_copy
+    elif "prompt" in temp_tool_input_copy:  # General fallback if planner uses "prompt"
+        prompt_value_for_agent = temp_tool_input_copy["prompt"]
+        temp_copy = temp_tool_input_copy.copy()
+        temp_copy.pop("prompt")
+        kwargs_for_agent = temp_copy
+    elif temp_tool_input_copy:  # If specific keys but no primary_input_key matched
+        if len(temp_tool_input_copy) == 1:
+            prompt_value_for_agent = list(temp_tool_input_copy.values())[0]
+        else:  # Multiple args, no clear primary
+            prompt_value_for_agent = current_task.description
+            kwargs_for_agent = temp_tool_input_copy
+    else:  # No tool_input provided by planner
+        prompt_value_for_agent = current_task.description
+    
+    # Add router dependencies to kwargs
+    kwargs_for_agent['deps'] = RouterDeps(context=loop_state.shared_context.copy(), console=console)
+
+    # Execute the tool
+    tool_start_time = time.time()
+    try:
+        # Special case for knowledge base storage
+        if tool_name == "interact_with_knowledge_base" and tool_input_dict.get("action") == "store":
+            kb_query_to_store = tool_input_dict.get("kb_query", "Missing kb_query")
+            loop_state.shared_context.setdefault("knowledge_base", {})  # Ensure KB dict exists
+            fact_id = f"fact_{uuid.uuid4().hex[:8]}"
+            loop_state.shared_context["knowledge_base"][fact_id] = kb_query_to_store
+            tool_result_data = KnowledgeBaseResult(
+                query=kb_query_to_store, 
+                retrieved_facts=[{"id": fact_id, "data": kb_query_to_store}], 
+                action_taken="stored"
+            )
+            if console: 
+                console.print(f"[dim]Stored in mock KB via tool: '{kb_query_to_store}' as {fact_id}[/dim]")
+            # Track usage
+            usage_obj = Usage()
+            usage_obj.total_tokens = 20
+            _track_usage(loop_state, usage_obj, console)
+        else:
+            # Standard tool execution
+            tool_result_obj = await tool_agent.run(prompt_value_for_agent, **kwargs_for_agent)
+            tool_result_data = tool_result_obj.output
+            _track_usage(loop_state, tool_result_obj.usage, console)
+
+        # Store the result
+        loop_state.add_task_result(current_task, tool_result_data)
+        
+        # Report success if console is provided
+        if console:
+            console.print(f"[green]✓ Tool '{tool_name}' completed in {time.time() - tool_start_time:.2f}s.[/green]")
+            if verbose:
+                try:
+                    from rich.panel import Panel as RichPanel
+                    console.print(
+                        RichPanel(
+                            str(tool_result_data)[:500] + ('...' if len(str(tool_result_data)) > 500 else ''), 
+                            title=f"Result from {tool_name}", 
+                            expand=False, 
+                            border_style="dim"
+                        )
+                    )
+                except ImportError:
+                    console.print(f"Result from {tool_name}: {str(tool_result_data)[:500]}")
+        
+        return True
+        
+    except Exception as e:
+        # Handle tool execution failure
+        if console: 
+            console.print(f"[bold red]Tool Error ({tool_name}): {e}[/bold red]")
+        current_task.status = "failed"
+        current_task.result_summary = f"Error: {e}"
+        loop_state.stop_reason = f"Tool {tool_name} failed: {e}"
+        return False
+
+
+async def handle_terminal_decision(
+    decision: Union[SynthesizeFinalAnswer, StopProcessing],
+    loop_state: RouterLoopState,
+    console: Optional[Any] = None,
+    verbose: bool = False
+) -> None:
+    """
+    Handles terminal decisions (synthesis or stop) from the planner.
+    
+    Args:
+        decision: Either a SynthesizeFinalAnswer or StopProcessing decision
+        loop_state: The current state of the routing loop 
+        console: Optional rich console for output
+        verbose: Whether to show verbose debug output
+    """
+    # Handle SynthesizeFinalAnswer
+    if isinstance(decision, SynthesizeFinalAnswer):
+        reason = decision.reason_for_synthesis_or_stop
+        if console:
+            console.print(f"[bold green]Planner decided to synthesize final answer.[/bold green] Reason: {reason}")
+        
+        # Create synthesis prompt
+        synthesis_prompt = f"Original Query: {loop_state.original_query}\nAchieved Goal: {loop_state.current_goal}\n\nKey information gathered:\n"
+        if not loop_state.task_results:
+            synthesis_prompt += "No specific information was gathered by tools. Synthesize based on the query and goal directly if possible, or state that no further information could be obtained."
+        else:
+            for task_id, result_data in loop_state.task_results.items():
+                original_task = next((t for t in loop_state.plan if t.task_id == task_id), None)
+                task_desc_for_synth = original_task.description if original_task else f"Task {task_id}"
+                synthesis_prompt += f"- Result from '{task_desc_for_synth}': {str(result_data)[:300]}...\n"
+        
+        # Add shared context if available
+        planner_friendly_shared_context = {
+            k: v for k, v in loop_state.shared_context.items() 
+            if not k.startswith(SHARED_CONTEXT_INTERNAL_KEY_PREFIX)
+        }
+        if planner_friendly_shared_context:
+             synthesis_prompt += f"\nRelevant Shared Context: {str(planner_friendly_shared_context)[:300]}...\n"
+
+        # Run synthesis 
+        synthesis_start_time = time.time()
+        try:
+            synthesis_result_obj = await synthesis_agent.run(synthesis_prompt)
+            loop_state.final_answer = synthesis_result_obj.output
+            _track_usage(loop_state, synthesis_result_obj.usage, console)
+        except Exception as e:
+            if console: 
+                console.print(f"[bold red]Synthesis Error: {e}[/bold red]")
+            loop_state.final_answer = f"Error during final synthesis: {e}."
+            loop_state.stop_reason = f"Synthesis agent failed: {e}"
+        
+        if console: 
+            console.print(f"[green]✓ Synthesis completed in {time.time() - synthesis_start_time:.2f}s.[/green]")
+    
+    # Handle StopProcessing 
+    elif isinstance(decision, StopProcessing):
+        loop_state.stop_reason = decision.reason_for_synthesis_or_stop
+        if console:
+            console.print(f"[bold yellow]Planner decided to stop processing.[/bold yellow] Reason: {loop_state.stop_reason}")
+
+
+async def handle_max_iterations_reached(
+    loop_state: RouterLoopState,
+    console: Optional[Any] = None
+) -> None:
+    """
+    Handles the case when maximum iterations are reached.
+    
+    Args:
+        loop_state: The current state of the routing loop
+        console: Optional rich console for output
+    """
+    loop_state.stop_reason = "Maximum iterations reached."
+    if console:
+        console.print(f"[bold yellow]Maximum iterations ({loop_state.max_iterations}) reached. Stopping.[/bold yellow]")
+    
+    # Only attempt synthesis if we don't already have a final answer
+    if not loop_state.final_answer:  
+        if console:
+            console.print("[dim]Attempting final synthesis before exiting...[/dim]")
+            
+        # Create a simpler synthesis prompt for max iterations case
+        synthesis_prompt = f"Original Query: {loop_state.original_query}\nGoal: {loop_state.current_goal}\n"
+        synthesis_prompt += "Max iterations reached. Synthesize the best possible answer with information gathered so far:\n"
+        
+        # Add task results if available
+        if loop_state.task_results:
+            for task_id, result_data in loop_state.task_results.items():
+                original_task = next((t for t in loop_state.plan if t.task_id == task_id), None) 
+                task_desc = original_task.description if original_task else f"Task {task_id}"
+                synthesis_prompt += f"- {task_desc}: {str(result_data)[:150]}...\n"
+        
+        # Run synthesis
+        try:
+            synthesis_result_obj = await synthesis_agent.run(synthesis_prompt)
+            loop_state.final_answer = synthesis_result_obj.output
+            _track_usage(loop_state, synthesis_result_obj.usage, console)
+        except Exception as e:
+            loop_state.final_answer = f"Max iterations reached. Synthesis failed: {e}"
+
+
+def update_iteration_state(
+    loop_state: RouterLoopState,
+    console: Optional[Any] = None
+) -> bool:
+    """
+    Updates the iteration state and performs stall detection.
+    
+    Args:
+        loop_state: The current state of the routing loop
+        console: Optional rich console for output
+        
+    Returns:
+        True if the iteration should continue, False if we should stop (stalled)
+    """
+    # Calculate state hash for stall detection
+    current_iteration_end_hash = loop_state._calculate_state_hash()
+    
+    # Check for stall if we have a previous hash
+    if loop_state.previous_state_hash is not None and current_iteration_end_hash == loop_state.previous_state_hash:
+        loop_state.stop_reason = "Processing stalled; state has not changed since last iteration."
+        current_iteration_display_num = loop_state.iteration_count + 1
+        if console:
+            console.print(f"[bold yellow]Processing stalled after iteration {current_iteration_display_num}. Stopping.[/bold yellow]")
+        loop_state.iteration_count += 1  # Count the stalled iteration
+        return False
+    
+    # Store current hash for next iteration comparison
+    loop_state.previous_state_hash = current_iteration_end_hash
+    
+    # Increment iteration counter
+    loop_state.iteration_count += 1
+    
+    # Check if we've reached max iterations
+    if loop_state.iteration_count >= loop_state.max_iterations:
+        return False
+        
+    return True
 
 
 async def process_query_iteratively(
@@ -463,26 +809,34 @@ async def process_query_iteratively(
     """Process a user query iteratively using a planner-driven loop."""
     start_time_overall = time.time()
 
+    # Check if model is initialized correctly
     if not shared_gemini_model:
         error_message = "Core Gemini model initialization failed. Cannot process query."
-        if console: console.print(f"[bold red]{error_message}[/bold red]")
+        if console: 
+            console.print(f"[bold red]{error_message}[/bold red]")
         agg_response = AggregatedResponse(
-            final_answer=error_message, iterations_attempted=0, session_id="error_session",
+            final_answer=error_message, 
+            iterations_attempted=0, 
+            session_id="error_session",
             stop_reason="Model initialization failure"
         )
         return agg_response, initial_message_history or [UserMessage(content=query), AssistantMessage(content=error_message)]
 
+    # Initialize router loop state
     loop_state = RouterLoopState(
         original_query=query,
         current_goal=query,
         shared_context=initial_context.get("shared_context", {}) if initial_context else {}
     )
-    # Initialize internal tracking keys if not present
+    
+    # Initialize internal tracking keys
     loop_state.shared_context.setdefault(f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_tokens_consumed_loop", 0)
     loop_state.shared_context.setdefault(f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_cost_incurred_loop", 0.0)
 
-
+    # Prepare message history
     final_message_history: List[ModelMessage] = list(initial_message_history) if initial_message_history else []
+    
+    # Add user query to history if not already present
     user_query_in_history = False
     for msg in final_message_history:
         if isinstance(msg, ModelRequest):
@@ -493,237 +847,67 @@ async def process_query_iteratively(
     if not user_query_in_history:
         final_message_history.append(ModelRequest(parts=[UserPromptPart(content=query)]))
 
+    # Display initial info
     if console:
         console.print(f"[bold blue]Starting iterative processing (model: {GEMINI_MODEL_NAME}):[/bold blue] '{query}'")
         console.print(f"[dim]Session ID: {loop_state.session_id}[/dim]")
 
-    # iteration_count tracks completed iterations, loop runs for iteration_count = 0 to max_iterations-1
+    # Main loop
     while loop_state.iteration_count < loop_state.max_iterations:
-        current_iteration_display_num = loop_state.iteration_count + 1 # For logging 1-indexed
+        # Display iteration heading
+        current_iteration_display_num = loop_state.iteration_count + 1  # For logging 1-indexed
         if console:
             console.print(f"\n[bold magenta]--- Iteration {current_iteration_display_num} ---[/bold magenta]")
 
-        state_summary_for_planner = loop_state.get_summary_for_planner()
-        if console and verbose:
-            console.print("[bold dim]Planner Input Summary:[/bold dim]")
-            try:
-                from rich.panel import Panel as RichPanel # Local import for safety
-                console.print(RichPanel(state_summary_for_planner, title="State for Planner", expand=False, border_style="dim"))
-            except ImportError:
-                console.print(state_summary_for_planner)
-
-
-        planner_deps = RouterDeps(context=loop_state.shared_context.copy(), console=console) # Pass a copy
-        planner_start_time = time.time()
+        # Get next step from planner
         try:
-            planner_result_obj = await planner_orchestrator_agent.run(state_summary_for_planner, deps=planner_deps)
-            planner_decision = planner_result_obj.output
-            
-            # Debug check - print what the planner returned 
-            if console and verbose:
-                console.print(f"[dim]Debug - Planner decision type: {type(planner_decision)}, content: {planner_decision}[/dim]")
-                
-            _track_usage(loop_state, planner_result_obj.usage, console)
+            planner_decision = await plan_next_step(loop_state, console, verbose)
         except Exception as e:
-            if console: console.print(f"[bold red]Planner Error: {e}[/bold red]")
             loop_state.stop_reason = f"Planner agent failed: {e}"
             break
-        
-        planner_elapsed = time.time() - planner_start_time
-        if console:
-            console.print(f"[dim]Planner decision in {planner_elapsed:.2f}s: Action='{planner_decision.action}'[/dim]")
-            if verbose and planner_decision.thought:
-                try:
-                    from rich.panel import Panel as RichPanel
-                    console.print(RichPanel(planner_decision.thought, title="Planner's Thought", border_style="yellow", expand=False))
-                except ImportError:
-                    console.print(f"Planner Thought: {planner_decision.thought}")
-
-
-        if planner_decision.updated_goal:
-            if console: console.print(f"[cyan]Goal refined by planner to: '{planner_decision.updated_goal}'[/cyan]")
-            loop_state.current_goal = planner_decision.updated_goal
-        
-        # Handle the planner decision based on the discriminated union type
+            
+        # Process the planner decision
         if isinstance(planner_decision, CallTool):
-            tool_name = planner_decision.tool_name
-            task_description = planner_decision.task_description
-            
-            # Get tool input from the args field
-            tool_input_dict = planner_decision.args.model_dump() if planner_decision.args else {}
-
-            if not tool_name or tool_name not in AVAILABLE_TOOLS_SPEC:
-                if console: console.print(f"[bold red]Planner Error: Invalid or missing tool_name '{tool_name}'. Stopping.[/bold red]")
-                loop_state.stop_reason = f"Planner chose invalid tool: {tool_name}"
-                break
-
-            current_task = Task(description=task_description, agent_tool_name=tool_name, tool_input=tool_input_dict)
-            loop_state.plan.append(current_task)
-
-            if console:
-                console.print(f"[cyan]Executing Tool:[/cyan] '{tool_name}' for task '{current_task.description}'")
-                if verbose: console.print(f"[dim]Tool Input: {tool_input_dict}[/dim]")
-            
-            tool_spec = AVAILABLE_TOOLS_SPEC[tool_name]
-            tool_agent = tool_spec["agent"]
-            
-            # Prepare arguments for tool_agent.run()
-            # The first argument to agent.run is `messages_or_prompt`
-            # Other arguments are passed as kwargs.
-            
-            prompt_value_for_agent: Union[str, List[ModelMessage], BaseModel]
-            kwargs_for_agent: Dict[str, Any] = {}
-
-            # The planner should provide tool_input that matches the tool's expected arguments.
-            # For pydantic-ai Agent, the primary input is the first positional arg.
-            # We'll try to extract it based on `primary_input_key` or default to task_description.
-            
-            temp_tool_input_copy = tool_input_dict.copy()
-            primary_input_key = tool_spec.get("primary_input_key")
-
-            if primary_input_key and primary_input_key in temp_tool_input_copy:
-                prompt_value_for_agent = temp_tool_input_copy[primary_input_key]
-                temp_copy = temp_tool_input_copy.copy()
-                temp_copy.pop(primary_input_key)
-                kwargs_for_agent = temp_copy
-            elif "prompt" in temp_tool_input_copy: # General fallback if planner uses "prompt"
-                prompt_value_for_agent = temp_tool_input_copy["prompt"]
-                temp_copy = temp_tool_input_copy.copy()
-                temp_copy.pop("prompt")
-                kwargs_for_agent = temp_copy
-            elif temp_tool_input_copy: # If specific keys but no primary_input_key matched
-                                    # and no "prompt", this is ambiguous.
-                                    # For now, if only one arg, use it as prompt. Otherwise, error or use task_description.
-                if len(temp_tool_input_copy) == 1:
-                    prompt_value_for_agent = list(temp_tool_input_copy.values())[0]
-                    # kwargs_for_agent remains empty as the single key was used.
-                else: # Multiple args, no clear primary. Use task_description and pass others as kwargs.
-                    # This might not be ideal for all tools. Planner needs to be specific.
-                    prompt_value_for_agent = current_task.description
-                    kwargs_for_agent = temp_tool_input_copy
-            else: # No tool_input provided by planner
-                prompt_value_for_agent = current_task.description
+            # Execute the tool call
+            success = await execute_tool_call(planner_decision, loop_state, console, verbose)
+            if not success:
+                break  # Tool execution failed
                 
-            kwargs_for_agent['deps'] = RouterDeps(context=loop_state.shared_context.copy(), console=console)
-
-            tool_start_time = time.time()
-            try:
-                # output_type is set at agent instantiation, no need to change it here.
-                # tool_agent.output_type = tool_spec["output_type"] # REMOVED - Bug fix #2
-
-                if tool_name == "interact_with_knowledge_base" and tool_input_dict.get("action") == "store":
-                    kb_query_to_store = tool_input_dict.get("kb_query", "Missing kb_query")
-                    loop_state.shared_context.setdefault("knowledge_base", {}) # Ensure KB dict exists
-                    fact_id = f"fact_{uuid.uuid4().hex[:8]}"
-                    loop_state.shared_context["knowledge_base"][fact_id] = kb_query_to_store
-                    tool_result_data = KnowledgeBaseResult(query=kb_query_to_store, retrieved_facts=[{"id": fact_id, "data": kb_query_to_store}], action_taken="stored")
-                    if console: console.print(f"[dim]Stored in mock KB via tool: '{kb_query_to_store}' as {fact_id}[/dim]")
-                    # Create usage object correctly
-                    usage_obj = Usage()
-                    usage_obj.total_tokens = 20
-                    _track_usage(loop_state, usage_obj, console)
-                else:
-                    tool_result_obj = await tool_agent.run(prompt_value_for_agent, **kwargs_for_agent)
-                    tool_result_data = tool_result_obj.output
-                    _track_usage(loop_state, tool_result_obj.usage, console)
-
-                loop_state.add_task_result(current_task, tool_result_data)
-                if console:
-                    console.print(f"[green]✓ Tool '{tool_name}' completed in {time.time() - tool_start_time:.2f}s.[/green]")
-                    if verbose:
-                        try:
-                            from rich.panel import Panel as RichPanel
-                            console.print(RichPanel(str(tool_result_data)[:500] + ('...' if len(str(tool_result_data)) > 500 else ''), title=f"Result from {tool_name}", expand=False, border_style="dim"))
-                        except ImportError:
-                             console.print(f"Result from {tool_name}: {str(tool_result_data)[:500]}")
-            except Exception as e:
-                if console: console.print(f"[bold red]Tool Error ({tool_name}): {e}[/bold red]")
-                current_task.status = "failed"
-                current_task.result_summary = f"Error: {e}"
-                loop_state.stop_reason = f"Tool {tool_name} failed: {e}"
-                break # Exit loop on tool error
-
-        elif isinstance(planner_decision, SynthesizeFinalAnswer):
-            if console: console.print(f"[bold green]Planner decided to synthesize final answer.[/bold green] Reason: {planner_decision.reason_for_synthesis_or_stop}")
-            synthesis_prompt = f"Original Query: {loop_state.original_query}\nAchieved Goal: {loop_state.current_goal}\n\nKey information gathered:\n"
-            if not loop_state.task_results:
-                synthesis_prompt += "No specific information was gathered by tools. Synthesize based on the query and goal directly if possible, or state that no further information could be obtained."
-            else:
-                for task_id, result_data in loop_state.task_results.items():
-                    original_task = next((t for t in loop_state.plan if t.task_id == task_id), None)
-                    task_desc_for_synth = original_task.description if original_task else f"Task {task_id}"
-                    synthesis_prompt += f"- Result from '{task_desc_for_synth}': {str(result_data)[:300]}...\n"
+        elif isinstance(planner_decision, SynthesizeFinalAnswer) or isinstance(planner_decision, StopProcessing):
+            # Handle terminal decisions (synthesis or stop)
+            await handle_terminal_decision(planner_decision, loop_state, console, verbose)
+            # Terminal decisions increment iteration_count internally and break the loop
+            break
             
-            planner_friendly_shared_context = { k: v for k, v in loop_state.shared_context.items() if not k.startswith(SHARED_CONTEXT_INTERNAL_KEY_PREFIX)}
-            if planner_friendly_shared_context:
-                 synthesis_prompt += f"\nRelevant Shared Context: {str(planner_friendly_shared_context)[:300]}...\n"
-
-            synthesis_start_time = time.time()
-            try:
-                synthesis_result_obj = await synthesis_agent.run(synthesis_prompt)
-                loop_state.final_answer = synthesis_result_obj.output
-                _track_usage(loop_state, synthesis_result_obj.usage, console)
-            except Exception as e:
-                if console: console.print(f"[bold red]Synthesis Error: {e}[/bold red]")
-                loop_state.final_answer = f"Error during final synthesis: {e}."
-                loop_state.stop_reason = f"Synthesis agent failed: {e}"
-            if console: console.print(f"[green]✓ Synthesis completed in {time.time() - synthesis_start_time:.2f}s.[/green]")
-            # Iteration that decided to synthesize is considered completed.
-            loop_state.iteration_count += 1 
-            break
-        elif isinstance(planner_decision, StopProcessing):
-            loop_state.stop_reason = planner_decision.reason_for_synthesis_or_stop
-            if console: console.print(f"[bold yellow]Planner decided to stop processing.[/bold yellow] Reason: {loop_state.stop_reason}")
-            loop_state.iteration_count +=1 # Iteration that decided to stop is counted
-            break
-        # If we got here, we didn't match any format we understand
         else:
-            # This should never happen with the discriminated union, but just in case
+            # Unknown decision type (shouldn't happen with discriminated union)
             loop_state.stop_reason = "Planner returned unknown action type"
-            if console: console.print(f"[bold red]Error: Unknown planner action type. Stopping.[/bold red]")
-            loop_state.iteration_count +=1 # Iteration with error is counted
+            if console:
+                console.print(f"[bold red]Error: Unknown planner action type. Stopping.[/bold red]")
+            loop_state.iteration_count += 1  # Count the error iteration
+            break
+            
+        # Update iteration state and check for stalls/max iterations
+        should_continue = update_iteration_state(loop_state, console)
+        if not should_continue:
+            # If we hit max iterations, handle that specifically
+            if loop_state.iteration_count >= loop_state.max_iterations:
+                await handle_max_iterations_reached(loop_state, console)
             break
 
-        # Stall Check: Compare current state end with previous state end
-        # This check is for the iteration that just conceptually "finished"
-        current_iteration_end_hash = loop_state._calculate_state_hash()
-        # Stall check is only meaningful if at least one iteration has set previous_state_hash
-        if loop_state.previous_state_hash is not None and current_iteration_end_hash == loop_state.previous_state_hash:
-            loop_state.stop_reason = "Processing stalled; state has not changed since last iteration."
-            if console: console.print(f"[bold yellow]Processing stalled after iteration {current_iteration_display_num}. Stopping.[/bold yellow]")
-            loop_state.iteration_count += 1 # Count the stalled iteration
-            break
-        loop_state.previous_state_hash = current_iteration_end_hash # Save for the *next* iteration's comparison
-        
-        loop_state.iteration_count += 1 # Increment for the next loop cycle if not broken
-        
-        if loop_state.iteration_count >= loop_state.max_iterations:
-            loop_state.stop_reason = "Maximum iterations reached."
-            if console: console.print(f"[bold yellow]Maximum iterations ({loop_state.max_iterations}) reached. Stopping.[/bold yellow]")
-            if not loop_state.final_answer: # Attempt synthesis if max iterations hit
-                if console: console.print("[dim]Attempting final synthesis before exiting...[/dim]")
-                # (Synthesis logic as before)
-                synthesis_prompt_max_iter = f"Original Query: {loop_state.original_query}\nGoal: {loop_state.current_goal}\nMax iterations reached. Synthesize the best possible answer with information gathered so far:\n"
-                # ... (construct prompt)
-                try:
-                    synthesis_result_obj_max_iter = await synthesis_agent.run(synthesis_prompt_max_iter) # Simplified prompt
-                    loop_state.final_answer = synthesis_result_obj_max_iter.output
-                    _track_usage(loop_state, synthesis_result_obj_max_iter.usage, console)
-                except Exception as e_synth:
-                    loop_state.final_answer = f"Max iterations reached. Synthesis failed: {e_synth}"
-            break 
-
-    # Post-Loop
-    # iterations_attempted is loop_state.iteration_count as it's incremented before breaking or exiting loop
+    # Post-Loop processing
+    # Ensure iteration count is at least 1 even if loop didn't run but model was ok
     final_iterations_attempted = loop_state.iteration_count
-    if final_iterations_attempted == 0 and shared_gemini_model : # If loop never ran but model was ok (e.g. immediate planner error)
+    if final_iterations_attempted == 0 and shared_gemini_model:
         final_iterations_attempted = 1
 
-
+    # Set default final answer if none was generated
     if not loop_state.final_answer:
         loop_state.final_answer = f"Processing stopped. Reason: {loop_state.stop_reason or 'Unknown reason after loop.'}"
-        if console: console.print(f"[yellow]No final answer explicitly synthesized. Defaulting stop message.[/yellow]")
+        if console:
+            console.print(f"[yellow]No final answer explicitly synthesized. Defaulting stop message.[/yellow]")
 
+    # Create the aggregated response
     aggregated_response = AggregatedResponse(
         final_answer=loop_state.final_answer,
         iterations_attempted=final_iterations_attempted,
@@ -733,6 +917,7 @@ async def process_query_iteratively(
         total_cost_incurred=loop_state.shared_context.get(f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_cost_incurred_loop", 0.0)
     )
     
+    # Add the final answer to the message history
     from datetime import datetime
     final_message_history.append(
         ModelResponse(
@@ -743,10 +928,11 @@ async def process_query_iteratively(
         )
     )
 
+    # Display final statistics
     if console:
         console.print(f"\n[bold green]--- Iterative Processing Complete ---[/bold green]")
         console.print(f"[dim]Total time: {time.time() - start_time_overall:.2f}s[/dim]")
-        console.print(f"[dim]Iterations Attempted: {aggregated_response.iterations_attempted}[/dim]") # Changed wording
+        console.print(f"[dim]Iterations Attempted: {aggregated_response.iterations_attempted}[/dim]")
         console.print(f"[dim]Total Tokens (Loop): {aggregated_response.total_tokens_consumed}[/dim]")
         console.print(f"[dim]Estimated Cost (Loop): ${aggregated_response.total_cost_incurred:.6f}[/dim]")
         if aggregated_response.stop_reason:
