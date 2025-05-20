@@ -442,6 +442,11 @@ AVAILABLE_TOOLS_SPEC = {
 
 def _track_usage(loop_state: RouterLoopState, usage_data: Optional[Usage], console: Optional[Any]):
     """Tracks token usage and cost in the loop state."""
+    if console:
+        # Debug information
+        console.print(f"[dim]Debug - Usage data: {usage_data}[/dim]")
+        console.print(f"[dim]Debug - Has total_tokens: {getattr(usage_data, 'total_tokens', None) is not None}[/dim]")
+    
     if usage_data and getattr(usage_data, "total_tokens", None) is not None: # Fix #4
         loop_state.shared_context.setdefault(f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_tokens_consumed_loop", 0)
         loop_state.shared_context.setdefault(f"{SHARED_CONTEXT_INTERNAL_KEY_PREFIX}total_cost_incurred_loop", 0.0)
@@ -755,6 +760,13 @@ async def handle_max_iterations_reached(
         try:
             synthesis_result_obj = await synthesis_agent.run(synthesis_prompt)
             loop_state.final_answer = synthesis_result_obj.output
+            # Debug print out to see what's in the usage object
+            if console:
+                console.print(f"[dim]Debug - Synthesis Result Object: {synthesis_result_obj}[/dim]")
+                console.print(f"[dim]Debug - Synthesis Usage Type: {type(synthesis_result_obj.usage)}[/dim]")
+                if hasattr(synthesis_result_obj, 'usage'):
+                    console.print(f"[dim]Debug - Synthesis Usage Details: {synthesis_result_obj.usage.__dict__ if hasattr(synthesis_result_obj.usage, '__dict__') else 'No __dict__'}[/dim]")
+            
             _track_usage(loop_state, synthesis_result_obj.usage, console)
         except Exception as e:
             loop_state.final_answer = f"Max iterations reached. Synthesis failed: {e}"

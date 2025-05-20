@@ -17,11 +17,13 @@ The router can handle various types of queries, from factual information request
 
 ## Architecture
 
-The router agent is implemented using two complementary approaches:
+The router agent is implemented using three complementary approaches:
 
 1. **Agent Delegation**: A primary "router" agent delegates to specialized agents through tools and aggregates their responses. This is the approach used in the default implementation.
 
 2. **Graph-Based Structure**: A more advanced implementation using Pydantic-Graph, where the routing flow is represented as a state machine with explicit nodes for different stages of processing. This approach provides better visualization and a clearer path to building more complex routing logic.
+
+3. **Iterative Router (Gemini)**: A Google Gemini-based implementation that uses iterative planning and execution to solve complex tasks using a loop of specialized agents. This implementation is available in `router_agent2.py` and represents the first step toward the task delegation loop architecture outlined in our Future Plans.
 
 ### Router Graph Structure
 
@@ -58,11 +60,32 @@ python -m agents.router.visualizer --raw
 
 ## Specialized Agents
 
-The router currently delegates to three specialized agents:
+### Standard Router
+
+The standard router currently delegates to three specialized agents:
 
 1. **Search Agent**: Finds and extracts relevant information
 2. **Calculation Agent**: Performs mathematical calculations and provides step-by-step solutions
 3. **Text Analysis Agent**: Analyzes text for sentiment, summarizations, and key points
+
+### Iterative Router (Gemini)
+
+The Gemini-based iterative router has access to a wider range of specialized tools/agents:
+
+1. **Search Information**: Retrieves factual information
+2. **Perform Calculation**: Executes mathematical calculations
+3. **Analyze Text**: Analyzes text content comprehensively
+4. **Create Plan**: Breaks down complex tasks into subtasks
+5. **Perform Reasoning**: Handles logical deduction problems
+6. **Execute Code**: Writes or modifies code snippets
+7. **Analyze Data**: Processes structured data
+8. **Verify Information**: Checks correctness of statements
+9. **Summarize Content**: Creates focused summaries
+10. **Make Decision**: Evaluates options against criteria
+11. **Knowledge Base**: Stores and retrieves facts within a session
+12. **Media Analysis**: Processes images, audio, video, and documents
+
+The iterative router represents a powerful step toward our vision of a full task delegation system outlined in the Future Plans.
 
 ## Setup
 
@@ -77,6 +100,9 @@ export OPENAI_API_KEY=your_openai_api_key
 # Optional for using other models
 export ANTHROPIC_API_KEY=your_anthropic_api_key
 export MISTRAL_API_KEY=your_mistral_api_key
+
+# Required for the Iterative Router (Gemini)
+export GEMINI_API_KEY=your_gemini_api_key
 ```
 
 ### Model Configuration
@@ -131,6 +157,35 @@ async def example_graph():
     mermaid_code = visualize_graph()
     html_content = generate_html(mermaid_code)
     save_to_file(html_content, "router_graph.html")
+```
+
+#### Using the Iterative Router (Gemini)
+
+```python
+from agents.router.router_agent2 import process_query_iteratively
+
+async def example_iterative():
+    # Process a complex query using the iterative router
+    response, messages = await process_query_iteratively(
+        "What is the capital of France? Then search for its current population."
+    )
+    print(response.final_answer)
+    
+    # With context and conversation history
+    initial_context = {"shared_context": {"language": "en-US"}}
+    response2, messages = await process_query_iteratively(
+        "What are the top 3 tourist attractions there?", 
+        initial_context=initial_context,
+        initial_message_history=messages,
+        verbose=True  # Enable detailed logging
+    )
+    print(f"Follow-up answer: {response2.final_answer}")
+```
+
+To use the iterative router, you need to set the environment variable for Google Gemini API access:
+
+```bash
+export GEMINI_API_KEY=your_gemini_api_key
 ```
 
 ### Command Line Interface
@@ -198,6 +253,31 @@ You can customize the appearance of the CLI:
 # Set a theme for syntax highlighting
 python -m agents.router --theme light  # Options: dark, light, monokai, github-dark, gruvbox-dark
 ```
+
+#### Running the Iterative Router (CLI)
+
+The Gemini-based iterative router comes with its own CLI interface:
+
+```bash
+# Run with a direct query
+python -m agents.router.router_agent2 "What is the capital of France? Then search for its population."
+
+# Run in interactive mode
+python -m agents.router.router_agent2 --interactive
+
+# Run with less verbose output
+python -m agents.router.router_agent2 --quiet "What's the tallest building in Europe?"
+
+# Run without rich console formatting
+python -m agents.router.router_agent2 --no-console "Calculate 34 * 56 + 12"
+```
+
+In interactive mode, you can use these commands:
+- `/exit`: Exit the session
+- `/help`: Show help information
+- `/clear`: Clear the screen
+- `/verbose`: Enable detailed logging
+- `/quiet`: Disable detailed logging
 
 #### Using with UV and CLAI
 
@@ -278,3 +358,5 @@ See [FUTURE_PLANS.md](./FUTURE_PLANS.md) for detailed information about our visi
 - Iterative problem-solving through specialized agents
 - State management across multiple agent interactions
 - Advanced orchestration capabilities
+
+The `router_agent2.py` implementation represents our first step toward this vision, using Google's Gemini models with a planner-driven approach that can iteratively solve problems through multiple steps.
