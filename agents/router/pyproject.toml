@@ -10,7 +10,7 @@ authors = [
 ]
 description = "A router agent implementation for Pydantic-AI"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.0.0",
-    "pydantic-ai",
+    "pydantic-ai>=0.2.5",
     "rich>=10.0.0",
     "argparse>=1.4.0"
 ]

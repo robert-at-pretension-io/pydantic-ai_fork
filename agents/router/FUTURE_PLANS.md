@@ -2,26 +2,24 @@
 
 
 
-
-
-
 **Biggest-bang-for-buck, in order of ROI**
 
 | Rank  | Idea                                                                  | Why it unlocks outsized value right now                                                                                                                                                                                                                                     |
 | ----- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1** | **Central planning loop (single “Decider” + explicit `RouterState`)** | Turns the router from a dumb dispatcher into a *reasoning engine*: lets you chain agents, stop when goal met, parallelise independent work, and reuse the same logic for every new domain. Everything else (interrupts, metrics, new agents) plugs into this state machine. |
+| **1** | **Central planning loop (single "Decider" + explicit `RouterState`)** | Turns the router from a dumb dispatcher into a *reasoning engine*: lets you chain agents, stop when goal met, parallelise independent work, and reuse the same logic for every new domain. Everything else (interrupts, metrics, new agents) plugs into this state machine. |
 | **2** | **Shared session-context + semantic compression**                     | Eliminates the current re-fetch/re-compute tax, keeps token bills predictable, and gives every downstream agent richer input. Without it, the planner quickly blows past context limits.                                                                                    |
 | **3** | **Graceful user-interrupt handling**                                  | Makes the system feel interactive and saves wasted tokens/work when the user changes direction. Cheap to add once you have the planner loop; high UX win.                                                                                                                   |
-| 4     | Parallel execution of independent subtasks                            | Simple concurrency wrapper once the planner exists; cuts wall-clock latency for most real-world composite questions.                                                                                                                                                        |
-| 5     | Verification agent                                                    | Directly improves answer correctness and trust; implement as a post-hook the planner can call when `confidence < x`.                                                                                                                                                        |
-| 6     | Knowledge-base agent (lightweight)                                    | Start by stashing key/value facts in the shared context; full retrieval-augmented memory can come later.                                                                                                                                                                    |
-| 7     | Summarisation agent                                                   | Mostly a utility function the planner can call; value scales with context size.                                                                                                                                                                                             |
-| 8     | Reasoning / Decision agents                                           | Useful but overlap with the planner’s own LLM calls—do later unless you need domain-specific logic.                                                                                                                                                                         |
-| 9     | Formal loop-control heuristics (stall detection, budget caps)         | Important, but you’ll get 80 % of the protection by hard-capping iterations and issuing a warning.                                                                                                                                                                          |
-| 10    | Fancy visualiser & debugging UI                                       | Nice for demos; adds little direct end-user value compared with the capabilities above.                                                                                                                                                                                     |
+| **4** | **Multi-modal media handling**                                        | Enables richer inputs and outputs beyond text, supporting images, audio, video, and documents throughout the routing system. Leverages modern LLMs' multi-modal capabilities for more powerful applications.                                                                |
+| 5     | Parallel execution of independent subtasks                            | Simple concurrency wrapper once the planner exists; cuts wall-clock latency for most real-world composite questions.                                                                                                                                                        |
+| 6     | Verification agent                                                    | Directly improves answer correctness and trust; implement as a post-hook the planner can call when `confidence < x`.                                                                                                                                                        |
+| 7     | Knowledge-base agent (lightweight)                                    | Start by stashing key/value facts in the shared context; full retrieval-augmented memory can come later.                                                                                                                                                                    |
+| 8     | Summarisation agent                                                   | Mostly a utility function the planner can call; value scales with context size.                                                                                                                                                                                             |
+| 9     | Reasoning / Decision agents                                           | Useful but overlap with the planner's own LLM calls—do later unless you need domain-specific logic.                                                                                                                                                                         |
+| 10    | Formal loop-control heuristics (stall detection, budget caps)         | Important, but you'll get 80 % of the protection by hard-capping iterations and issuing a warning.                                                                                                                                                                          |
+| 11    | Fancy visualiser & debugging UI                                       | Nice for demos; adds little direct end-user value compared with the capabilities above.                                                                                                                                                                                     |
 
 **TL;DR:**
-Ship the **planner loop + shared context** first—they’re the backbone that lets every other fancy agent or UX feature plug in cleanly.
+Ship the **planner loop + shared context** first—they're the backbone that lets every other fancy agent or UX feature plug in cleanly.
 
 
 
@@ -49,6 +47,8 @@ This approach will enable handling complex multi-step tasks while maintaining a 
 
 The following specialized agents would form the ecosystem of our router's delegation network:
 
+### Text-Based Agents
+
 | Agent Type | Primary Function | Examples |
 |------------|-----------------|----------|
 | **Planning Agent** | Break down complex tasks into specific subtasks | "Create a 3-step plan to analyze this dataset" |
@@ -61,6 +61,17 @@ The following specialized agents would form the ecosystem of our router's delega
 | **Decision Agent** | Make recommendations based on multiple inputs | "Which database technology should I use for this case?" |
 | **Knowledge Base Agent** | Maintain context information throughout task-solving | "Remember and apply information from earlier steps" |
 | **User Interaction Agent** | Ask clarifying questions when needed | "What specific format would you like the output in?" |
+
+### Multi-Modal Agents
+
+| Agent Type | Primary Function | Examples |
+|------------|-----------------|----------|
+| **Image Analysis Agent** | Process and understand visual information | "Identify objects in this image", "Describe what's shown in this diagram" |
+| **Audio Processing Agent** | Analyze audio files, transcribe speech | "Transcribe this recording", "Identify speakers in this conversation" |
+| **Video Processing Agent** | Process video content, extract key frames | "Summarize what happens in this video", "Extract key moments" |
+| **Document Analysis Agent** | Extract information from PDFs, spreadsheets | "Extract data tables from this PDF", "Summarize this research paper" |
+| **Media Transformation Agent** | Convert between media formats | "Convert this video to annotated image frames", "Create audio narration from text" |
+| **Multi-Modal Synthesis Agent** | Combine insights from multiple media types | "Analyze this image and related audio to explain what's happening" |
 
 ## Iterative Planner Approach
 
@@ -145,6 +156,12 @@ class RouterState:
     last_plan_hash: Optional[str] = None  # For detecting stalled plans
     user_interrupt: Optional[str] = None  # Stores any user interrupt message
     
+    # Media handling
+    media_items: Dict[str, Union[
+        ImageUrl, AudioUrl, VideoUrl, DocumentUrl, BinaryContent
+    ]] = field(default_factory=dict)
+    media_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    
     # Final result
     final_response: Optional[str] = None
     
@@ -186,6 +203,49 @@ class RouterState:
     def clear_user_interrupt(self) -> None:
         """Clear the user interrupt after handling it."""
         self.user_interrupt = None
+        
+    # Media handling methods
+    def add_media(self, 
+                 media_id: str, 
+                 media: Union[ImageUrl, AudioUrl, VideoUrl, DocumentUrl, BinaryContent],
+                 metadata: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Add a media item to the state with optional metadata.
+        
+        Args:
+            media_id: Unique identifier for the media
+            media: The media item object
+            metadata: Optional metadata about the media
+        """
+        self.media_items[media_id] = media
+        if metadata:
+            self.media_metadata[media_id] = metadata
+            
+    def get_media(self, media_id: str) -> Optional[Union[ImageUrl, AudioUrl, VideoUrl, DocumentUrl, BinaryContent]]:
+        """Retrieve a media item from the state."""
+        return self.media_items.get(media_id)
+        
+    def get_media_metadata(self, media_id: str) -> Dict[str, Any]:
+        """Get metadata for a media item."""
+        return self.media_metadata.get(media_id, {})
+        
+    def update_media_metadata(self, media_id: str, key: str, value: Any) -> None:
+        """Update metadata for a media item."""
+        if media_id not in self.media_metadata:
+            self.media_metadata[media_id] = {}
+        self.media_metadata[media_id][key] = value
+        
+    def get_media_by_type(self, media_type: str) -> List[Tuple[str, Any]]:
+        """Get all media items of a specific type."""
+        return [
+            (media_id, media) for media_id, media in self.media_items.items()
+            if (
+                (media_type == "image" and hasattr(media, "is_image") and media.is_image) or
+                (media_type == "audio" and hasattr(media, "is_audio") and media.is_audio) or
+                (media_type == "video" and hasattr(media, "is_video") and media.is_video) or
+                (media_type == "document" and hasattr(media, "is_document") and media.is_document)
+            )
+        ]
 ```
 
 ### Planning Node With Interrupt Handling
@@ -575,6 +635,77 @@ class RouterState:
 
 This approach ensures that context is intelligently managed without losing critical semantic meaning, which is far superior to raw truncation methods.
 
+### Multi-Modal Router Implementation
+
+A key enhancement will be extending the router to fully support multi-modal interactions across all specialized agents:
+
+1. **Media Type Support**
+   - Extend the `RouterState` to track media assets throughout the processing pipeline
+   - Implement seamless passing of media between specialized agents (images, audio, video, documents)
+   - Support both URL-based media and binary content representations
+
+2. **Specialized Media-Aware Agents**
+   - **Audio Processing Agent**: Analyze audio files, transcribe speech, identify speakers
+   - **Image Analysis Agent**: Analyze images, detect objects, generate descriptions
+   - **Video Processing Agent**: Extract frames, analyze content, summarize
+   - **Document Analysis Agent**: Parse documents, extract structured information, summarize content
+
+3. **Media Type Conversion**
+   - Support conversion between media formats when needed (e.g., video to image frames)
+   - Implement media transformation tools for agents (transcription, captioning, etc.)
+   - Handle compression and optimization for efficient processing
+
+4. **Multi-Modal Context Management**
+   - Track media references in shared context
+   - Apply specialized compression strategies for different media types
+   - Implement content-aware semantic summarization for non-text media
+
+5. **Implementation Architecture**
+   ```python
+   @dataclass
+   class RouterMediaState:
+       """Tracks media assets through the routing process."""
+       media_items: Dict[str, Union[ImageUrl, AudioUrl, VideoUrl, DocumentUrl, BinaryContent]] = field(default_factory=dict)
+       media_annotations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+       
+       def add_media(self, media_id: str, media: Any) -> None:
+           """Add a media item to the state."""
+           self.media_items[media_id] = media
+           
+       def get_media(self, media_id: str) -> Optional[Any]:
+           """Retrieve a media item from the state."""
+           return self.media_items.get(media_id)
+           
+       def add_annotation(self, media_id: str, annotation_type: str, content: Any) -> None:
+           """Add an annotation (e.g., description, transcription) to a media item."""
+           if media_id not in self.media_annotations:
+               self.media_annotations[media_id] = {}
+           self.media_annotations[media_id][annotation_type] = content
+   ```
+
+6. **Media-Aware Tool Definitions**
+   ```python
+   @router_agent.tool
+   async def analyze_image(ctx: RunContext[RouterDeps], image: Union[ImageUrl, BinaryContent]) -> ImageAnalysisResult:
+       """
+       Analyze an image using the image analysis agent.
+       Only use this when processing image content.
+       """
+       # Add to media state for tracking
+       media_id = f"img_{uuid.uuid4()}"
+       ctx.state.media_state.add_media(media_id, image)
+       
+       # Process with specialized agent
+       result = await image_analysis_agent.run(image, usage=ctx.usage)
+       
+       # Store annotations
+       ctx.state.media_state.add_annotation(
+           media_id, "analysis", result.output.description
+       )
+       
+       return result.output
+   ```
+
 ## Key Technical Challenges
 
 1. **Loop Prevention**: Mechanisms to avoid infinite loops if a task can't be completed
@@ -585,6 +716,7 @@ This approach ensures that context is intelligently managed without losing criti
 6. **Domain Boundaries**: Defining clear boundaries between specialized agents while allowing flexible execution paths
 7. **Interrupt Handling**: Gracefully handling user interrupts without losing important context or progress
 8. **Semantic Compression**: Intelligently compressing context while preserving meaning and retrievability
+9. **Multi-Modal Media Handling**: Supporting various media types (images, audio, video, documents) across the entire routing system
 
 ## Implementation Roadmap
 
@@ -597,7 +729,8 @@ This approach ensures that context is intelligently managed without losing criti
 7. **Phase 7**: Develop advanced user interaction for clarifications and feedback
 8. **Phase 8**: Implement graceful interrupt handling for mid-execution refinements
 9. **Phase 9**: Implement semantic context compression for efficient token management
-10. **Phase 10**: Create visualization and debugging tools for workflow inspection
+10. **Phase 10**: Add multi-modal media handling capabilities across the router system
+11. **Phase 11**: Create visualization and debugging tools for workflow inspection
 
 ## Example Use Cases
 
@@ -626,6 +759,19 @@ These complex workflows would benefit from the task delegation loop:
    - Test understanding
    - Adapt to user's progress
 
+5. **Multi-Modal Content Analysis**
+   - Analyze uploaded media (images, audio, video, documents)
+   - Extract key information from different modalities
+   - Integrate insights across modalities
+   - Provide unified understanding of complex multi-modal content
+
+6. **Media Production Assistant**
+   - Take a concept and create complementary media assets
+   - Generate text descriptions based on visual content
+   - Create audio narratives from text content
+   - Transform between different media formats as needed
+   - Combine multiple media types into cohesive presentations
+
 ## Contribution Guidelines
 
 If you're interested in contributing to these future developments:
@@ -638,20 +784,113 @@ If you're interested in contributing to these future developments:
 By implementing this iterative planning architecture, our router agent will evolve into a powerful orchestrator capable of solving complex problems through dynamic planning, delegation, and refinement.
 
 
-**Biggest-bang-for-buck, in order of ROI**
+That's an incredibly comprehensive and well-thought-out plan for the Router Agent! The level of detail, especially regarding the iterative planner, state management, context handling (including semantic compression), and multi-modal capabilities, is excellent. You've covered most of the critical aspects for building a robust and intelligent orchestration system.
 
-| Rank  | Idea                                                                  | Why it unlocks outsized value right now                                                                                                                                                                                                                                     |
-| ----- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1** | **Central planning loop (single “Decider” + explicit `RouterState`)** | Turns the router from a dumb dispatcher into a *reasoning engine*: lets you chain agents, stop when goal met, parallelise independent work, and reuse the same logic for every new domain. Everything else (interrupts, metrics, new agents) plugs into this state machine. |
-| **2** | **Shared session-context + semantic compression**                     | Eliminates the current re-fetch/re-compute tax, keeps token bills predictable, and gives every downstream agent richer input. Without it, the planner quickly blows past context limits.                                                                                    |
-| **3** | **Graceful user-interrupt handling**                                  | Makes the system feel interactive and saves wasted tokens/work when the user changes direction. Cheap to add once you have the planner loop; high UX win.                                                                                                                   |
-| 4     | Parallel execution of independent subtasks                            | Simple concurrency wrapper once the planner exists; cuts wall-clock latency for most real-world composite questions.                                                                                                                                                        |
-| 5     | Verification agent                                                    | Directly improves answer correctness and trust; implement as a post-hook the planner can call when `confidence < x`.                                                                                                                                                        |
-| 6     | Knowledge-base agent (lightweight)                                    | Start by stashing key/value facts in the shared context; full retrieval-augmented memory can come later.                                                                                                                                                                    |
-| 7     | Summarisation agent                                                   | Mostly a utility function the planner can call; value scales with context size.                                                                                                                                                                                             |
-| 8     | Reasoning / Decision agents                                           | Useful but overlap with the planner’s own LLM calls—do later unless you need domain-specific logic.                                                                                                                                                                         |
-| 9     | Formal loop-control heuristics (stall detection, budget caps)         | Important, but you’ll get 80 % of the protection by hard-capping iterations and issuing a warning.                                                                                                                                                                          |
-| 10    | Fancy visualiser & debugging UI                                       | Nice for demos; adds little direct end-user value compared with the capabilities above.                                                                                                                                                                                     |
+When thinking about an *abstract flow for tackling problems* that can apply generally but also fit your initial programming workflow use case, the stages you've implicitly and explicitly outlined are very strong. Let's try to distill them into a slightly more generalized abstract flow and see if anything feels underrepresented or could be highlighted.
 
-**TL;DR:**
-Ship the **planner loop + shared context** first—they’re the backbone that lets every other fancy agent or UX feature plug in cleanly.
+Your current "Core Architecture Vision" (Analyze, Decompose, Plan, Delegate, Evaluate, Iterate) is a solid foundation. We can expand slightly on this for a general problem-solving framework:
+
+**Proposed Abstract Problem-Solving Stages (and how your plan maps to them):**
+
+1.  **Problem Intake & Understanding (Clarification)**
+    * **Description:** Receiving the initial problem statement from the user and ensuring the system has a clear grasp of the *actual* need, not just the literal words. This might involve initial clarifying questions even before deep planning.
+    * **Your Plan:**
+        * "Receive user task"
+        * Initial part of "Analyze the user's task"
+        * `RouterState.query` and `RouterState.goal` (with refinement)
+        * `UserInteractionAgent` ("Ask clarifying questions when needed") and `PlanningNode` logic for `{"action": "clarify"}`.
+    * **Consideration:** While your plan covers clarification *during* the loop, explicitly emphasizing an *initial* understanding/clarification phase can be beneficial, especially for ambiguous requests. This could be a dedicated first pass by a lightweight "Understanding Agent" or a specific mode of the Planning Agent.
+
+2.  **Goal Definition & Scoping**
+    * **Description:** Translating the understood problem into a well-defined, achievable goal with clear success criteria. This includes understanding constraints and the desired output format.
+    * **Your Plan:**
+        * `RouterState.goal` (interpreted and refined)
+        * "Success Criteria: How to determine when the task is complete"
+        * "Stop-criteria & Final Synthesis"
+    * **Consideration:** This is well covered. Perhaps making the "Success Criteria" more explicit and potentially user-confirmable at the start for complex tasks could be an addition.
+
+3.  **Strategy Formulation & Decomposition (Planning)**
+    * **Description:** Developing a high-level strategy to achieve the goal. This involves breaking the main goal into manageable sub-tasks, identifying dependencies, and selecting potential tools/approaches (or agents). For a programming task, this would be like outlining modules, functions, and data flows.
+    * **Your Plan:**
+        * "Decompose it into subtasks"
+        * "Plan the execution order"
+        * `Planning Agent`
+        * `RouterState.tasks`
+        * "Central planning loop (single "Decider" + explicit `RouterState`)"
+    * **Consideration:** This is the core of your planner and is very well detailed.
+
+4.  **Resource & Knowledge Acquisition (Gathering)**
+    * **Description:** Identifying and gathering necessary information, data, tools, or pre-existing knowledge components required for the sub-tasks. For programming, this could be finding relevant libraries, APIs, code snippets, or documentation.
+    * **Your Plan:**
+        * `Research Agent`
+        * `Knowledge-base agent` (even lightweight)
+        * "Shared session-context + semantic compression" (crucial for making knowledge available)
+        * `Context-Builder Implementation Pipeline`
+    * **Consideration:** This is well covered, especially with the focus on shared context.
+
+5.  **Execution & Monitoring (Doing & Tracking)**
+    * **Description:** Executing the planned sub-tasks using the appropriate agents/tools. This stage includes monitoring the progress of each sub-task and managing any runtime issues.
+    * **Your Plan:**
+        * "Delegate each subtask to appropriate specialized agents"
+        * "Execute agent with context from current state (with interrupt monitoring)"
+        * `DomainNode` execution
+        * `RouterState.iteration_count`, `completed_tasks`
+        * "Loop Control & Safety Rails" (Max iterations, stall detection)
+        * "Parallel execution of independent subtasks"
+    * **Consideration:** Thoroughly covered. The interrupt handling and parallel execution are excellent additions here.
+
+6.  **Intermediate Evaluation & Refinement (Checking & Adjusting)**
+    * **Description:** After each significant sub-task or a set of sub-tasks, evaluating the intermediate results against the plan and the overall goal. This is where the system decides if the current path is fruitful, if the plan needs adjustment, if more clarification is needed, or if a sub-goal has been met. This is the core of the iterative loop.
+    * **Your Plan:**
+        * "Evaluate intermediate results"
+        * "Single "Decider" Step After Every Subgraph Call"
+        * `PlanningNode` logic (complete, clarify, execute)
+        * `Verification Agent` (can be used here)
+        * "Graceful user-interrupt handling" (allows user-driven refinement)
+    * **Consideration:** This is a central strength of your design.
+
+7.  **Solution Synthesis & Presentation (Compiling & Delivering)**
+    * **Description:** Once the overall goal is deemed met, compiling all intermediate results, analyses, and outputs into a coherent, final solution that directly addresses the user's defined goal.
+    * **Your Plan:**
+        * "Dedicated 'synthesis' agent creates the final user-visible answer"
+        * `FinalizeResponseNode`
+        * `RouterState.final_response`
+        * `Summarisation Agent` (can play a role here)
+    * **Consideration:** Well covered.
+
+8.  **(Optional but valuable) Post-Solution Reflection & Learning**
+    * **Description:** After delivering the solution, the system (or its developers) could analyze the problem-solving process itself. What worked well? What was inefficient? How can the planning, agent selection, or knowledge utilization be improved for similar future tasks? For user-facing systems, this could also involve soliciting user feedback on the solution's quality.
+    * **Your Plan:** This is more of a meta-level stage. While not explicitly a runtime stage for solving a *single* problem, the data collected (`RouterState`, history, metrics) could feed into a longer-term improvement loop for the agent system itself. "Fancy visualiser & debugging UI" could help in this offline analysis.
+    * **Consideration:** For the *immediate* problem-solving loop, this is out of scope, but it's a natural extension for evolving the system's intelligence over time.
+
+**Are any stages missing?**
+
+Based on the abstract flow above, your plan is exceptionally comprehensive. The stages you've designed cover the problem-solving lifecycle in great detail. The areas I've highlighted are more about emphasis or slight re-framing rather than outright missing pieces:
+
+* **Explicit Initial Understanding/Scoping:** While your `PlanningNode` can ask for clarification, ensuring a very solid understanding and agreed-upon scope *before* extensive decomposition could prevent wasted cycles. This might just be an early phase of your existing "Analyze" step, perhaps with a higher tendency to use the `UserInteractionAgent` if ambiguity is high.
+* **Constraint Management:** You mention "budget caps." Explicitly considering other constraints (e.g., user-specified preferences for tools/libraries in a programming task, desired output formats, ethical boundaries if applicable) as part of Goal Definition or Strategy Formulation could be beneficial. Your flexible `RouterState` and context could accommodate this.
+
+**Mapping to Programming Workflow:**
+
+Your system is well-suited for programming:
+
+1.  **Problem Intake & Understanding:** User: "Write a Python script to scrape a website and save data to CSV." System might ask: "Which website? What specific data points? Any login required?"
+2.  **Goal Definition & Scoping:** Goal: Script takes URL, extracts specific fields (e.g., product name, price), handles pagination, saves to `output.csv`. Constraints: Use `requests` and `BeautifulSoup`, handle network errors.
+3.  **Strategy Formulation & Decomposition:**
+    * Task 1: Fetch HTML (Coding Agent with `requests`).
+    * Task 2: Parse HTML to find data (Coding Agent with `BeautifulSoup`).
+    * Task 3: Handle pagination logic (Coding Agent).
+    * Task 4: Write to CSV (Coding Agent).
+    * Task 5: Main script structure, error handling (Coding Agent).
+    * Task 6: Test individual functions (Verification Agent/Coding Agent).
+4.  **Resource & Knowledge Acquisition:** Identify `requests`, `BeautifulSoup` docs. (Research Agent if needed for complex APIs).
+5.  **Execution & Monitoring:** Agents generate code snippets. System tracks which parts are done.
+6.  **Intermediate Evaluation & Refinement:** Snippet for fetching HTML works. Parsing snippet fails on some pages – refine selectors (user interrupt or planner re-evaluates). Tests pass/fail.
+7.  **Solution Synthesis & Presentation:** Combine all code, add comments, provide a `README` on how to run it.
+8.  **(Post-Solution):** User reports the script is slow. Future "Reflection & Learning" might prioritize more efficient scraping techniques or caching strategies for similar tasks.
+
+**Conclusion:**
+
+Your plan is not missing any major *fundamental* stages for a sophisticated problem-solving agent. The architecture is robust and forward-thinking. The slight suggestions above are more about potential refinements in emphasis or breaking out sub-phases within your existing components for clarity in an abstract model. The key is that your iterative loop with the "Decider" (`PlanningNode`) inherently allows for revisiting any of these conceptual stages as needed.
+
+The focus on the "Central planning loop" and "Shared session-context" is spot on, as these are the enablers for truly dynamic and intelligent problem-solving.
