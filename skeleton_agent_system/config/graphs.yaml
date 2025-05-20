@@ -1,0 +1,41 @@
+# Graph configuration
+# This file defines the graph structure and node connections
+
+graphs:
+  root:
+    module: app.graphs.root
+    class: root_graph
+    nodes:
+      - QueryClassification
+      - SearchSubgraphNode
+      - CodingSubgraphNode
+      - OperationsSubgraphNode
+      - ResultAggregation
+    start_node: QueryClassification
+    
+  search:
+    module: app.graphs.domains.search.graph
+    class: search_graph
+    nodes:
+      - QueryFormulation
+      - WebSearch
+      - ResultFiltering
+    start_node: QueryFormulation
+    
+  coding:
+    module: app.graphs.domains.coding.graph
+    class: coding_graph
+    nodes:
+      - CodeTaskAnalysis
+      - CodeGeneration
+      - TestGeneration
+    start_node: CodeTaskAnalysis
+    
+  operations:
+    module: app.graphs.domains.operations.graph
+    class: operations_graph
+    nodes:
+      - BashCommandFormulation
+      - CommandExecution
+      - OutputAnalysis
+    start_node: BashCommandFormulation

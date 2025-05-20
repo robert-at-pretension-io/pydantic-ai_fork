@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "router-agent"
+version = "0.1.0"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+description = "A router agent implementation for Pydantic-AI"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pydantic>=2.0.0",
+    "pydantic-ai",
+    "rich>=10.0.0",
+    "argparse>=1.4.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "isort>=5.0.0",
+    "mypy>=1.0.0",
+]
+cli = [
+    "prompt-toolkit>=3.0.0",
+    "argcomplete>=2.0.0",
+    "pygments>=2.14.0"
+]
+
+[project.scripts]
+router-agent = "agents.router.__main__:main"
+router-cli = "agents.router.__main__:run_direct_cli"

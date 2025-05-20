@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent_system"
+version = "0.1.0"
+description = "A hierarchical multi-agent system built with Pydantic-AI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Your Name", email = "your.email@example.com" },
+]
+dependencies = [
+    "pydantic-ai>=0.6.0",
+    "pydantic-graph>=0.1.0",
+    "pydantic>=2.0.0",
+    "aiohttp>=3.8.0",
+    "sqlalchemy>=2.0.0",
+    "jinja2>=3.0.0",
+    "pyyaml>=6.0.0",
+    "logfire>=0.8.0",
+]
+
+[project.optional-dependencies]
+observability = [
+    "pydantic-evals>=0.3.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp>=1.20.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true

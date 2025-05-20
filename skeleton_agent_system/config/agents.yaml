@@ -1,0 +1,61 @@
+# Agent configuration
+# This file defines all agents in the system, their properties, and dependencies
+
+agents:
+  # Deterministic leaf agents
+  search:
+    module: app.agents.deterministic.search
+    class: search_agent
+    deterministic: true
+    model: "openai:gpt-4o"
+    tools: []
+    description: "Specialized agent for search tasks"
+    
+  calculator:
+    module: app.agents.deterministic.calculator
+    class: calculator_agent
+    deterministic: true
+    model: "anthropic:claude-3-sonnet"
+    tools: []
+    description: "Specialized agent for mathematical calculations"
+    
+  code_completion:
+    module: app.agents.deterministic.code_completion
+    class: code_completion_agent
+    deterministic: true
+    model: "openai:gpt-4o"
+    tools: ["read_file", "write_file"]
+    description: "Specialized agent for code generation tasks"
+    
+  bash_executor:
+    module: app.agents.deterministic.bash
+    class: bash_agent
+    deterministic: true
+    model: "anthropic:claude-3-sonnet"
+    tools: ["bash_executor"]
+    description: "Specialized agent for executing bash commands"
+    
+  # Router/coordinator agents
+  query_classifier:
+    module: app.agents.router.classifier
+    class: classifier_agent
+    deterministic: false
+    model: "openai:gpt-4o"
+    tools: []
+    description: "Classifies incoming queries and determines which sub-graph to use"
+    
+  context_builder:
+    module: app.agents.router.context_builder
+    class: context_builder_agent
+    deterministic: false
+    model: "openai:gpt-4o"
+    tools: []
+    description: "Builds optimized context packages for specialized agents"
+    
+  result_synthesizer:
+    module: app.agents.router.synthesizer
+    class: synthesizer_agent
+    deterministic: false
+    model: "openai:gpt-4o"
+    tools: []
+    description: "Aggregates and synthesizes results from multiple agents"
